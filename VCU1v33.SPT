@@ -1,0 +1,3551 @@
+
+;This is code for 4 curtain Curtain commander with the SPI output board
+;And 1 temp sensor, the SPI outputs are correct. The original 1 I made had traces swapped
+
+
+menu_parameters  mequ 200,16  
+
+effective_temp mequ 112,4
+average_temp   mequ 116,4 
+
+curtainOFF  mequ 6,13 ;13 bytes so no other memory goes in permstore area
+temperature mequ 20,4
+temp_a      mequ 24,4;temporalry storage for raw temperature 
+raining_for_curtains mequ 29 ;If curtain got shut by rain, it will not try to open untill rain has stopped
+maxmotors            mequ 28 
+humid_for_curtains   mequ 30 ;If curtain already opened for humditity 
+overloaded_motor_closing     mequ 34,4 ;if any motorss are overloaded when closing ,1 byte per motor 
+overloaded_motor_opening     mequ 38,4 ;if overloaded when opening
+
+   
+temperaturebyte    mequ 46  ; temperature counter 
+
+fscratchpad  mequ  50,4
+ 
+outputbitsmem   mequ 60,2 
+SPI_bits_mem    mequ 62,5
+SPI_bits_mem_4  mequ 66                   
+Display_n_number deffloat    
+
+Dcurtain_direction_bit  defsem  ;true if opening
+menu_in_use        defsem
+wind    deffloat
+amps   deffloat    
+humidity defbyte    
+ 
+amp_cal_number defbyte
+amp_cal_float  deffloat    
+ 
+overload_sync  defbyte ;a number used when display overloaded curtains                            
+temp_amp      deffloat ;temporary storage for next amp reading  
+amp_reading   defbyte  ;which reading the amp meter is at                
+curtain_amp_timer_short deftime24     ;if motor runs less than this it will not be considered against limit 
+            
+down  iequ    4
+enter iequ   6
+up    iequ   5      
+item_inactive defsem  ;do not use this outside of menu instance, it needs to hold data when menu yields.
+curtain_run_timer equ 1 ;timer 1 is used for curtain run time
+                                                                                                          
+tiv_status     defsem
+wind_disabled  defsem ;if windmeter is disabled so you can use all 4 inputs for rain
+               SPxMode         6   
+               
+                SetV            5                                
+                MemToUV         SPI_bits_mem,0             ;Transfer V bytes from RAM to U
+                SPxTxFrU        0               ;Send it out
+              
+                
+                permrecall    ;read if curtain was turned off before controller lost power
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+;temperature inut logic
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ 
+         loadi curtain_i
+         gosub nv_config_parameters 
+         goifxlt 4,use_wind_sensor     ;if 4 curtains are in use, it disables the windreadings 
+         sets  wind_disabled
+use_wind_sensor   
+         on 4 ;temperature sensor power
+         goifinon   up,amp_meter_zero_function 
+         goifinon   down,Test_IO
+              
+         goifinoff enter,normal_startup    
+         launchtask write_spi_outputs 
+         launchtask config_menu
+         runtasksforever
+                     
+
+normal_startup      
+
+         
+         launchtask LCD_RH_display 
+      ;   launchtask lcd_eff_temp 
+
+
+       ;  launchtask startwindmeter
+         launchtask lcd_info_begin_point
+         launchtask temperature_startup     
+         launchtask  write_spi_outputs
+        ; launchtask   duty_cycle_start_point
+      
+        
+         loadi curtain_i
+         gosub nv_config_parameters 
+         xtoi
+         goifiz Check_fan_launch;if there are no curtains then it jumps staright to the fans         
+         deci 
+         itox          
+         launchtaskx  curtain_start_point
+         goifiz Check_fan_launch
+         
+         deci 
+         itox          
+         launchtaskx  curtain_start_point
+         goifiz Check_fan_launch
+         
+         
+         deci 
+         itox          
+         launchtaskx  curtain_start_point
+         goifiz Check_fan_launch
+         
+         
+         deci 
+         itox          
+         launchtaskx  curtain_start_point
+        
+ 
+Check_fan_launch
+         loadi fan_i
+         gosub nv_config_parameters 
+         gosubift launch_start_fan  
+        
+         
+          loadi HVLS_output
+          gosub nv_config_parameters 
+          gosubift launch_HVLs        
+          
+          loadi heater_i
+          gosub nv_config_parameters 
+          gosubift launch_heaters
+          
+         runtasksforever   
+
+launch_start_fan
+          launchtask  fan_start_point
+          return
+
+launch_HVLs
+       launchtask  Variable_speed_outputs
+       return
+       
+launch_heaters
+       launchtask   heater_start_point
+       return       
+                   
+                   
+;******************************************************************
+amp_meter_zero_function 
+    loadx %00111000   ;C
+    loadx 255
+    outputm 21     
+    
+    loadx %01110111   ;A
+    loadx 255
+    outputm 13
+ 
+    
+    loadx %00111001
+    loadx 255
+    outputm 5 
+     
+    
+    on 15 
+    pause 20
+    floadw 0
+    fstore amp_cal_float
+    setmem amp_cal_number,100 
+loop_amp_cal 
+    pause 25
+    gosub get_amp_meter_cal
+    decm amp_cal_number
+    recall amp_cal_number
+    goift loop_amp_cal
+    
+    frecallq amp_cal_float
+    floadw 100 
+    fdiv   
+    
+    nvsetptr nvram_amp_meter_cal
+    nvsetreclen 1
+    nvsetrecnum 0 
+    NVfWriteW 0
+   
+     loadx %01010100 ;d
+    loadx 255
+    outputm 21
+    
+    loadx %01011100 ;o
+    loadx 255
+    outputm 13
+    
+    loadx %01011110 ;n
+    loadx 255
+    outputm 5 
+    pause 300
+    goto  normal_startup
+    
+get_amp_meter_cal
+    fanin 1       
+    frecallq amp_cal_float
+    fadd
+    fstore amp_cal_float
+    return
+;----------------------------------------------------------------------
+;       Test the outputs 
+current_relay   defbyte
+
+Test_IO
+       launchtask write_spi_outputs   
+       launchtask test_outputs
+       runtasksforever
+       
+       
+       
+test_outputs
+       GOSUB lcd_relay_number 
+       settimer 0,600  ;timeout for it to restart the controller, so it cannot stay in test mode inadvetently
+   
+Relay_control  
+       test   0
+       goiff  normal_startup ;will make controller crash as it already did a runtasksforever.
+       YIELDTASK     
+       INPUT up
+       GOSUBIFt inc_relay
+       waitoff up
+       INPUT down 
+       GOSUBIFT dec_relay
+       waitoff down
+
+       INPUT enter
+       GOIFT turn_relay_on 
+       GOTO relay_control
+
+turn_relay_on 
+        gosub lcd_on
+        recall current_relay   
+        xtoi
+   iasj:sets 0,outputbitsmem 
+        waitoff enter
+        recall current_relay   
+        xtoi     
+   iasj:clrs 0,outputbitsmem  
+        gosub lcd_off
+        goto test_outputs
+;----
+inc_relay
+      incm current_relay
+      recall current_relay
+      gosubifxgt 4,limit_output_number   
+      GOSUB lcd_relay_number
+      return
+      
+dec_relay
+      decm current_relay
+      recall current_relay
+      gosubifxgt 7,limit_output_number 
+      GOSUB lcd_relay_number     
+      return
+limit_output_number
+       SETMEM current_relay,0
+       return  
+;--------       
+lcd_off
+     gosub  lcd_relay_number
+     return
+lcd_on
+     
+     loadx d_oo
+    loadx 255
+    outputm 5
+    
+    loadx d_nn 
+    loadx 255
+    outputm 13
+    
+    loadx %00000000 ;n
+    loadx 255
+    outputm 21 
+     
+     
+     oblcd_setcur 1,12
+     oblcd_text "on "
+     return
+;----------   
+lcd_relay_number
+     
+     
+      recall current_relay
+      incx
+      float
+      fstore  Display_n_Number 
+      setmem data_type,0
+      gosub LCD_display_number
+      return
+
+
+
+
+;---------------------------------------------------------------------
+temperature_startup 
+        on 4
+        setmem temperaturebyte,250
+       
+       
+        
+temp_standard_loop
+       yieldtask
+       gosub Temp_read_sensor
+       goifmnz  temperaturebyte,temp_standard_loop
+       gosub temp_update
+       goto temp_standard_loop 
+ 
+
+
+Temp_read_sensor 
+       decm temperaturebyte         
+       fanin 1 
+      
+      frecallq temp_a 
+      fadd
+      fStore       temp_a   
+      
+      
+      loadi con_sensor 
+      gosub nv_config_parameters 
+     
+      push
+      push
+      retiff  
+      push
+      goifxeq 1,Humidity_sensor
+      goifxeq 2,external_amp_meter
+      return
+     ; goto temp_2_input
+      
+Humidity_sensor
+                       ;--4-20 ma humidity sensor        
+       fanin 0 
+       floadq      125 ;calibrates it to 0-100% rh ;2/5/09 changed to 125/25 for kele humidity
+       fmul
+       fwtoq
+       floadw 25
+       fsub
+       fgoifneg Humidity_disconnected
+       fix
+       store humidity                                                     
+      return
+Humidity_disconnected
+       setmem humidity,0
+       return 
+ 
+ 
+ 
+ 
+      fanin 1    ;--0-5 volt humidity sensor with 0-10v input
+      floadq 200 
+      fmul
+      fix
+      store humidity
+      return
+      
+       
+ 
+ 
+   
+      
+      
+amp_cal_get      ;gets the 0 offset for amp meter
+      NVSetPage    0  
+      nvsetptr nvram_amp_meter_cal
+      nvsetreclen 4
+      nvsetrecnum 0 
+      NVfreadW 0   
+      return
+
+
+        floadw 10
+        fstore amps
+external_amp_meter ;0-10 volt input from 20 amp=10 volts  
+       
+         fanin 0
+         fwtoq
+         gosub amp_cal_get
+        
+         fsub  ;now has 0 offset 
+         floadq 20
+         fmul ;20 amps at 10 volts
+         fstore   fscratchpad
+         
+        loadi amp_meter_cal  ;at 1 or above it means external and it gets mutipled so you can have it ahead of a transformer
+        gosub  nv_config_parameters  
+        float 
+        floadq .1
+        fmul
+         
+        frecallq fscratchpad
+        fmul
+           
+        frecallq amps
+        fsub
+        fwtoq 
+        loadi amp_dithering
+        gosub  nv_config_parameters
+        float
+        fdiv
+        frecallq amps
+        fsub
+        fstore amps
+        return 
+ 
+ 
+ 
+ 
+ 
+      
+temp_update
+      frecallw    temp_a  
+     
+      fwtoq
+      floadw 250     ;for 250 temperature reads
+      fdiv    
+       fstore      fscratchpad 
+      fLoadQ       -2.279564E+03       ;<< X^5 coefficient
+      fMul
+      fLoadQ       6.403044E+03      ;<< X^4 coefficient
+      fAdd
+      fRecallQ     fscratchpad
+      fMul
+      fLoadQ       -7.082205E+03      ;<< X^3 coefficient
+      fAdd
+      fRecallQ     fscratchpad
+      fMul
+      fLoadQ       3.857019E+03     ;<< X^2 coefficient
+      fAdd
+      fRecallQ     fscratchpad
+      fMul
+      fLoadQ       -1.127918E+03      ;<< X^1 coefficient
+      fAdd
+      fRecallQ     fscratchpad
+      fMul
+      fLoadQ       1.807325E+02      ;<< X^0 coefficient
+      fAdd
+          
+      
+          
+          
+      floadq       1.8
+      fmul
+      floadq   32
+      fadd    
+                       ;it does not need offset at 85°, so I commented it out July-8-2012
+      ;fwtoq     ;7.2 offset so calibration can be zero
+      ;floadw 3  ;what it takes to get it accurate
+     ; fsub
+      
+      
+      
+
+      
+      
+      loadi celcuis
+      gosub nv_config_parameters 
+      goiff farenheit  
+      
+      fwtoq
+      floadw 32
+      fsub         
+      floadq       .5555
+      fmul
+         
+      
+farenheit  
+     fstore temperature   
+     floadw 0
+     fstore temp_a 
+     setmem  temperaturebyte,250
+     return   
+
+;------------------------------------------------------------
+
+windwheel     iEQU    2       ;Define the count channel
+
+startwindmeter
+       yieldtask
+       goifst  wind_disabled,startwindmeter    ;because input 2 is shared with rain sensor #3
+       
+      OBCB_Start      windwheel   
+      obcb_frdclr     windwheel 
+
+       settimer 5,600
+intial_wind_reading_loop
+        yieldtask
+        test 5
+        goift intial_wind_reading_loop
+        
+       loadi anemometer_cal 
+       gosub nv_config_parameters          ; calibration index 
+       float 
+       floadq .1 ;the calibration value is the revolutions the windwheel must take in 1 mi
+       fmul       ;minute for 1 mph or kph
+       fwtoq
+       obcb_frdclr windwheel 
+       fswap
+       fdiv
+       fstore wind
+    
+       gosub setwindtimer
+       
+wind_rain_meterMainLoop
+       yieldtask
+       test 5                           ; wind timer
+       gosubifz windmath 
+       gosub windwheel_light 
+       goto wind_rain_meterMainLoop 
+
+windmath
+       loadi anemometer_cal 
+       gosub nv_config_parameters          ; calibration index 
+       float
+       fwtoq
+       loadi wind_minutes
+       gosub nv_config_parameters        ; how many minutes worth of averaging
+       float
+       fmul
+       fwtoq
+       obcb_frdclr windwheel                              ;frecallq windcount
+       fswap
+      
+       fdiv
+       fstore wind
+       gosub setwindtimer
+       return
+
+
+
+
+
+setwindtimer
+       loadi wind_minutes
+       gosub nv_config_parameters
+       float
+       floadq 6000 ;1 minute
+       fmul
+       fsettimer 5       ;resets windtimer
+       return  
+       
+
+
+windwheel_light 
+       
+       goifst menu_in_use,wind_wheel_off
+       goifinoff windwheel,wind_wheel_off
+       on 12
+       return
+wind_wheel_off
+       off 12
+       return   
+
+;
+ 
+
+
+
+
+       
+;
+
+
+
+
+
+;+++++++++++++++++++++++++++++++++++++++++++++++++++
+;write output logic for SPI board,
+
+;--------------------------------------------------
+write_spi_outputs
+
+               SPxMode         6   
+    
+outputs           
+                yieldtask 
+                recall outputbitsmem
+                loadx  %00001111
+                outputm 0
+                goto    outputs     
+                
+                
+
+;                yieldtask  
+;                gosub           Set_SPI_bytes
+;                SetV            5                                
+;                MemToUV         SPI_bits_mem,0             ;Transfer V bytes from RAM to U
+ ;               SPxTxFrU        0               ;Send it out
+;             
+ ;               GoTo            outputs  
+
+;Set_SPI_bytes
+;           loadi 0
+;           loadx 0
+;           istore SPI_bits_mem 
+;                                   
+;            loadi 1
+;           loadx 0
+;           istore SPI_bits_mem 
+           
+;            loadi 2
+;           loadx 0
+;           istore SPI_bits_mem 
+           
+;            loadi 3
+;           loadx 0
+;           istore SPI_bits_mem
+           
+                     
+ ;               loadi 4
+ ;         recall outputbitsmem 
+  ;         istore SPI_bits_mem
+   ;        return              
+;-----------------------------------------------------------------
+;___________--logtic to manually open the curtain---______________
+
+manual_run_curtain_open 
+                    marktime 
+                     clrs  0,outputbitsmem ;if curtain was closinging automatically, this shuts it off
+Manual_open_intialize_loop                    
+                     yieldtask 
+                     goifinon down,turn_curtain_off   ;if you press close, it will disable the curtain
+                     loopiftiming 50,Manual_open_intialize_loop
+
+                      sets 1,outputbitsmem
+
+wait_to_turn_off_manual_open
+                     yieldtask 
+                     goifinon down,turn_curtain_off    ;if you press close, it will disable the curtain
+                     input up
+                     goift wait_to_turn_off_manual_open
+
+open_is_off
+                     clrs  1,outputbitsmem
+                     goto  lcd_loop_wait
+;---------                     
+manual_run_curtain_closed
+                    marktime 
+                     clrs  1,outputbitsmem ;if curtain was opening automatically, this shuts it off
+Manual_close_intialize_loop                    
+                     yieldtask 
+                     goifinon up,turn_curtain_off   ;if you press close, it will disable the curtain
+                     loopiftiming 25,Manual_close_intialize_loop
+
+                      sets 0,outputbitsmem
+
+wait_to_turn_off_manual_close
+                     yieldtask 
+                     goifinon up,turn_curtain_off    ;if you press close, it will disable the curtain
+                     input down
+                     goift wait_to_turn_off_manual_close
+
+                     clrs  0,outputbitsmem
+                     goto  lcd_loop_wait          
+                     
+
+turn_curtain_off  
+                 clrs 0,outputbitsmem
+                 clrs 1,outputbitsmem
+                  setmem    curtainOFF,255    ;
+                  permstore
+                 goto     lcd_display_start
+     
+;******************************************************************8
+;Process display and the entire menu logic
+;*******************************************************************      
+;main loop for lcd data and check if it should go to menu    
+;Data_type     defbyte      ;how to display byte in floating point register
+currentmenu  defbyte      ;which menu is being displayed
+smenuposition defbyte     ; position of submenu ,when menu is being used 
+M_max_int     defbyte      ;max amount adjustedinterger can scroll too
+M_min_int     defbyte      ;minimum  adjustedinterger can be
+sub_menu_depth defbyte       ;how far sub menu can go  
+adjusted_int    defbyte     ;the modified value of the parmeter
+data_type     defbyte     ;how to display a number
+
+lcd_status     defbyte   
+
+
+
+lcd_info_begin_point 
+           gosub  alloff
+           floadw 32    ;version number 
+           fstore  Display_n_Number 
+           setmem data_type,1
+           gosub LCD_display_number
+           pause 300
+
+
+
+        
+lcd_display_start  
+          
+           gosub lcd_get_display 
+
+lcd_loop_wait           
+           yieldtask
+                                      
+           input enter               ;10-26-2014 commented out the off logic. They decide to put manual switch box in to kill power
+           recall curtainOFF
+           and
+           goift        turnCurtainON
+            
+           goifinon enter,parameter_menu   
+        
+           
+           goifmt curtainOFF,off_curtain_return_point
+           input up
+           goift manual_run_curtain_open       
+           input down
+           goift manual_run_curtain_closed           
+            
+           
+off_curtain_return_point                       
+           loopiftiming 200,lcd_loop_wait 
+           gosub   lcd_get_display 
+           goto    lcd_loop_wait
+           
+lcd_get_display
+           setmem   task_display_index,0  ;so humidity task stops displaying RH%  
+           goifmt   CurtainOFF,display_OFF ;  if curtain is off, screen will only show OFF
+        
+           recall   lcd_status 
+           gosubifz lCD_reset_status 
+           decm     lcd_status 
+           branchm  lcd_status            
+           target   lcd_temperature_display
+           target   lcd_temperature_display
+           target   lcd_humidity 
+           target   LCD_C1_humidity
+           target   LCD_fan_humidity
+           
+lcd_temperature_display
+           marktime
+           setmem data_type,0
+           frecallw temperature
+           fstore  Display_n_Number
+           gosub   LCD_display_number 
+           return
+ 
+;-- 
+lCD_reset_status
+          setmem lcd_status,5  ;this must be how many differant dispalys are shown , 1 based
+          return          
+                      
+;--                          
+
+               
+lcd_humidity
+       loadi con_sensor 
+       gosub nv_config_parameters 
+       goifxne 1,lcd_Humidity_no_show      
+       marktime
+       setmem task_display_index,5;for humidity
+       return
+
+lcd_Humidity_no_show
+        return   
+        
+        
+LCD_C1_humidity  
+              loadi 0
+         iasj:recalls 0,humid_for_curtains
+              retiff           ;no rain if its false
+               
+               marktime
+         
+               loadx           D_hh
+               loadx           255
+               outputm         5
+               loadx           D_1
+               loadx           255
+               outputm         13
+               loadx           0
+               loadx           255
+               outputm         21
+               return       
+
+
+
+LCD_fan_humidity
+             
+              recall fan_too_humid
+              retiff           ;no rain if its false               
+               marktime
+         
+               loadx           D_hh
+               loadx           255
+               outputm         5
+               loadx           D_2
+               loadx           255
+               outputm         13
+               loadx           0
+               loadx           255
+               outputm         21
+               return       
+
+
+turnCurtainON
+         loadx d_oo      ;o
+       loadx 255
+       outputm 5
+       
+       loadx d_NN      ;
+       loadx 255
+       outputm 13  
+       
+        loadx 0     ;
+       loadx 255
+       outputm 21 
+       
+       pause 75
+       setmem  curtainOFF,0 
+       permstore
+       goto   lcd_display_start 
+
+              
+              
+              
+              
+              
+              
+  
+ 
+
+
+
+;-----------
+                            
+
+display_OFF  
+       
+       loadx %01011100      ;o
+       loadx 255
+       outputm 5
+       
+       loadx %01110001      ;F
+       loadx 255
+       outputm 13  
+       
+        loadx %01110001     ;F
+       loadx 255
+       outputm 21 
+       return
+;-----------------------------------        
+
+heater_logic     
+get_heater_output_i
+        loadi curtain_i
+        gosub nv_config_parameters
+        float
+        floadq 2
+        fmul
+        fwtoq     
+        loadi fan_i
+        gosub nv_config_parameters
+        float 
+        fadd
+        fwtoq
+        recall k_index        
+        float
+        fadd
+        fix
+        xtoi
+        return
+
+
+
+;---------------------------------------------------
+
+         
+task_display_index defbyte
+   launchtask  LCD_RH_display
+          runtasksforever
+
+LCD_RH_display 
+           yieldtask
+           recall task_display_index
+           goifxne 5,LCD_RH_display
+        
+LCD_RH_blink_begin
+           gosub LCD_RH_display_RH
+           gosub LCD_RH_display_r 
+            
+           marktime
+LCD_RH_wait_for_H
+            yieldtask
+            recall task_display_index
+            goifxne 5,LCD_RH_display
+            loopiftiming 50,LCD_RH_wait_for_H
+            
+            gosub LCD_RH_display_h  
+            marktime
+LCD_RH_wait_for_R
+            yieldtask
+            recall  task_display_index
+            goifxne 5,LCD_RH_display
+            loopiftiming 200,LCD_RH_wait_for_R
+            goto LCD_RH_blink_begin
+                      
+;---           
+    
+LCD_RH_display_RH
+             recall humidity
+             push
+             gosubifxgt 99,reset_RH_to99 
+             float  
+             floadq 10
+             fmul
+             fstore  Display_n_Number
+             setmem data_type,1
+             gosub   LCD_display_number
+             return 
+reset_RH_to99
+         loadx 99
+         return  
+;--        
+LCD_RH_display_r 
+          loadx D_rr   
+          loadx 255
+          outputm  21
+          return
+;--          
+LCD_RH_display_h 
+          loadx D_hh   
+          loadx 255
+          outputm  21
+          return          
+
+
+
+
+
+;*****************************************---------------------- 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;######################################################################
+exit_menu
+          waitoff enter  
+          setmem smenuposition,1 ;this must be set to 1 for the text sub to work
+          nvsetptr end_of_menu_text
+          gosub   Display_text          
+           pause 300
+           clrs  menu_in_use
+           gosubifmz currentmenu,resetcontroller
+          goto lcd_display_start
+
+resetcontroller
+              float
+              goto  resetcontroller
+             
+         ; this will rest the unit     
+;-------- 
+config_menu     
+             setmem currentmenu,0              
+             setmem sub_menu_depth,20 ;the depth of the config menu   
+             gosub M_set_exit_timer
+             goto Menu_system
+
+parameter_menu 
+            clrs item_inactive 
+            sets  menu_in_use
+             gosub M_set_exit_timer
+             setmem currentmenu,1
+             setmem task_display_index,0 ;so instances which display info do not appear
+              
+Menu_system  
+             gosub alloff  
+             setmem smenuposition,1   
+             waitoff enter
+             goto M_inc_logic_done;this is so it checks if P1 is a valid paramter, it  
+                                    ;it comes back here Menudisplay label
+Menu_display_label 
+          
+             recall smenuposition 
+             goifz exit_menu  
+             gosub M_get_setpoint_value 
+             store adjusted_int  
+
+M_blink_label               
+             gosub M_get_parameter_label 
+             waitoff enter                                         
+             marktime 
+             settimer 6,200
+Menu_label_Loop
+              yieldtask
+             goifinon   up,Menu_parameter_display
+         
+             goifinon  down,Menu_parameter_display
+           
+             goifinon enter,M_advance_smenuposition  
+             test 6
+             goiff   Menu_parameter_display              
+             test 7
+             goift Menu_label_Loop ;1 minute if no buttons where pressed it will exit menu
+             goto exit_menu  
+
+Menu_parameter_display             
+             gosub m_get_SP_low_high_points;gets the low and high points and the data_type            
+             gosub M_display_SP_on_screen
+             settimer 6,250                        
+                         
+Menu_parameter_loop 
+             yieldtask 
+             goifinon   up,M_increase_value
+             goifinon   down,M_decrease_value  
+             
+             goifinon   enter,M_advance_smenuposition
+             test 6
+             goiff  M_blink_label
+             goto  Menu_parameter_loop
+
+M_display_SP_on_screen 
+             recall adjusted_int
+             float 
+             fstore  Display_n_Number
+             gosub LCD_display_number 
+             return
+                                                       
+;------------------------------
+;logic for when the up or down buttons are pressed                                          
+M_increase_value
+          pause 15
+            goifinon up,M_increase_value
+           gosub M_set_SP_display_timer
+           incm    adjusted_int 
+           recall  adjusted_int
+           float
+           fwtoq
+           recall m_max_int
+           float 
+           gosub CompareFloating_point
+           goifxeq 2,M_int_too_high                                               
+           goto Menu_parameter_display
+M_int_too_high
+           recall M_min_int
+           store adjusted_int
+           goto Menu_parameter_display                                         
+
+M_decrease_value  
+           pause 15                                        
+           goifinon down,M_decrease_value 
+           gosub M_set_SP_display_timer  
+           recall  adjusted_int 
+           goifz   M_int_too_low  ;this will keep it from rolling to 255
+           decm    adjusted_int            
+           
+           recall  adjusted_int
+           float
+           fwtoq
+           recall m_min_int  
+           float
+           gosub CompareFloating_point
+           goifxeq 1,M_int_too_low                              
+           goto Menu_parameter_display                               
+                                          
+M_int_too_low
+          recall m_max_int
+          store adjusted_int  
+          goto   Menu_parameter_display 
+;---         
+CompareFloating_point
+          Fcomparer
+          branchr
+          target CF_point_EQ
+          target CF_point_W_is_big
+          target CF_point_Q_is_big
+CF_point_EQ
+         loadx 0
+         return
+CF_point_W_is_big
+         loadx 1
+         return
+CF_point_Q_is_big
+         loadx 2
+         return                            
+                    
+;----           
+;-------------------
+M_set_SP_display_timer
+      settimer 6,300 ;whenever a SP is adjuted it will blink the SP  
+       gosub    M_set_exit_timer
+       return      
+       
+M_set_exit_timer
+       settimer 7,2000
+       return    
+
+;-----------------------------
+;this logic is run whenever the enter button is pressed, if SP was changed it store sit otherwise it scrolls the menu          
+M_advance_smenuposition  
+           pause 15
+           goifinon enter,M_advance_smenuposition
+           gosub  M_set_exit_timer
+           gosub M_get_setpoint_value   
+           float
+           fwtoq
+           recall adjusted_int
+           float
+           fsub
+           fgoifnz M_store_new_setpoint                                                                                  
+ 
+Incm_menuposition 
+          incm smenuposition
+          recall sub_menu_depth
+          float
+          fwtoq
+          recall  smenuposition
+          float
+          fsub
+          fgoifneg reset_sub_menu_position
+          goto M_inc_logic_done
+
+reset_sub_menu_position
+          setmem smenuposition,0
+          goto Menu_display_label; returns if it scrolled the full loop
+
+M_inc_logic_done 
+          gosub m_get_SP_low_high_points   ; it gets the high low points here , just to tell if item is not to be displayed
+          goifst item_inactive,skipping_hidden_items
+          goto Menu_display_label   
+
+skipping_hidden_items
+           ClrInstCount 
+           clrs  item_inactive
+           goto  Incm_menuposition  
+        
+          
+M_store_new_setpoint    
+          gosub  M_find_ptr
+          nvsetreclen 1
+          nvsetrecnum 0
+          recall smenuposition
+          decx 
+          xtoi
+          recall adjusted_int
+          invpopbyte
+          goto  M_inc_logic_done         
+
+;-------------------------------------------------------
+;this logic checks if the SP is tow low or high
+
+ 
+m_get_SP_low_high_points
+            branchm currentmenu
+            target   m_config_limit
+            target   m_par_limit
+
+m_config_limit
+          recall smenuposition
+          decx
+          branch
+          target c_l_1
+          target C_L_2
+          target c_l_3
+          target C_L_4
+          target c_l_5
+          target C_L_6
+          target c_l_7
+          target C_L_8
+          target C_L_9
+          target c_l_10
+          target C_L_11
+          target C_L_12 
+          target C_L_13
+          target c_l_14
+          target C_L_15
+          target C_L_16 
+          target C_L_17  
+          target C_L_18
+          target C_L_19
+          target C_L_20 
+          
+          
+c_l_1     
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,4   
+         return    
+c_l_2       
+       
+
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,6    
+         return 
+         
+        
+c_l_3
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,8    
+         return          
+
+c_l_4
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,1    
+         return                  
+
+      
+c_l_5
+         setmem data_type,0        
+         setmem M_min_int,10 
+         setmem M_max_int,254    
+         return    
+c_l_6
+         setmem data_type,1
+         setmem M_min_int,10 
+         setmem M_max_int,254    
+         return 
+ 
+c_l_7
+         setmem data_type,0         
+         setmem M_min_int,0 
+         setmem M_max_int,10    
+         return    
+c_l_8
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,60    
+         return
+         
+c_l_9
+         setmem data_type,3
+         setmem M_min_int,0 
+         setmem M_max_int,1    
+         return           
+c_l_10
+         setmem data_type,3
+         setmem M_min_int,0 
+         setmem M_max_int,1    
+         return           
+c_l_11    
+                                 ;
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,2    
+         return  
+c_l_12    
+         ; gosub p_check_if_any_sprinkler_exist    ;if sprinklers use effetive temp 
+       ;  gosubiff set_item_inactive
+         setmem data_type,3
+         setmem M_min_int,0 
+         setmem M_max_int,1    
+         return           
+                      
+c_l_13                       ;if any HVLS 0-10v output exists
+        
+         setmem data_type,3
+         setmem M_min_int,0 
+         setmem M_max_int,1    
+         return              
+c_l_14                      
+
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+         setmem data_type,1
+         setmem M_min_int,0 
+         setmem M_max_int,50    
+         return                 
+
+c_l_15  
+          loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+         setmem data_type,1
+         setmem M_min_int,0 
+         setmem M_max_int,255    
+         return              
+c_l_16   
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,9    
+         return        
+c_l_17   
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+         setmem data_type,1
+         setmem M_min_int,0 
+         setmem M_max_int,255    
+         return              
+         
+c_l_18   
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,255    
+         return                                      
+                 
+c_l_19   
+         
+         
+         setmem data_type,0
+         setmem M_min_int,0 
+         setmem M_max_int,2                                           -+
+         return                             
+ 
+c_l_20   
+         
+         
+         setmem data_type,1
+         setmem M_min_int,0 
+         setmem M_max_int,255    
+         return                   
+ 
+                 
+                 
+m_par_limit 
+          setmem sub_menu_depth,62 ;the depth of the parameter menu
+          recall smenuposition
+          decx
+          branch
+          target p_l_1
+          target p_L_2
+          target p_l_3
+          target p_L_4
+          target p_l_5
+          target p_L_6
+          target p_l_7
+          target p_L_8
+          target p_l_9
+          target p_L_10
+          target p_l_11
+          target p_L_12 
+          target p_l_13
+          target p_L_14
+          target p_l_15
+          target p_L_16
+          target p_l_17
+          target p_L_18
+          target p_l_19
+          target p_L_20
+          target p_l_21
+          target p_L_22 
+          target p_l_23
+          target p_L_24
+          target p_l_25  
+          target p_L_26
+          target p_l_27
+          target p_L_28
+          target p_l_29
+          target p_L_30
+          target p_l_31
+          target p_L_32 
+          target p_l_33
+          target p_L_34
+          target p_l_35
+          target p_L_36
+          target p_l_37
+          target p_L_38
+          target p_l_39
+          target p_L_40
+          target p_l_41
+          target p_L_42 
+          target p_l_43
+          target p_L_44
+          target p_l_45 
+          target p_L_46
+          target p_l_47
+          target p_L_48
+          target p_l_49
+          target p_L_50
+          target p_l_51
+          target p_L_52 
+          target p_l_53
+          target p_L_54  
+          target p_L_55 
+          target p_l_56
+          target p_L_57 
+          target p_L_58  
+          target p_L_59 
+          target p_l_60
+          target p_L_61   
+          target p_L_62
+       
+p_l_1     
+         loadi curtain_i
+         gosub nv_config_parameters 
+         gosubiff set_item_inactive   
+         
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,99  
+         return    
+p_l_2    
+
+         loadi curtain_i
+         gosub nv_config_parameters 
+         gosubifxlt 2,set_item_inactive
+               
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,99   
+         return 
+         
+        
+p_l_3    
+         loadi curtain_i
+         gosub nv_config_parameters 
+         gosubifxlt 3,set_item_inactive
+
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,99  
+         return          
+
+p_l_4       
+         loadi curtain_i
+         gosub nv_config_parameters 
+         gosubifxlt 4,set_item_inactive   
+         
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,99  
+         return                  
+
+      
+p_l_5    
+        loadi curtain_i
+        gosub nv_config_parameters 
+        goiff set_item_inactive
+            
+         setmem data_type,0        
+         setmem M_min_int,1 
+         setmem M_max_int,195   
+         return    
+p_l_6      
+         loadi curtain_i
+         gosub nv_config_parameters 
+         goiff set_item_inactive  
+                        
+         setmem data_type,1
+         setmem M_min_int,1 
+         setmem M_max_int,255    
+         return 
+
+p_l_7    
+          loadi curtain_i
+         gosub nv_config_parameters 
+         goiff set_item_inactive  
+          
+         
+         
+         setmem data_type,1
+         setmem M_min_int,1 
+         setmem M_max_int,255  
+         return 
+
+p_l_8       
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+         
+          loadi curtain_i
+         gosub nv_config_parameters 
+         gosubifxlt 1,set_item_inactive
+         
+         setmem data_type,5
+         setmem M_min_int,0 
+         setmem M_max_int,99  
+         return    
+p_l_9      
+
+          loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+         loadi curtain_i
+         gosub nv_config_parameters 
+         gosubifxlt 2,set_item_inactive
+               
+         setmem data_type,5
+         setmem M_min_int,0 
+         setmem M_max_int,99   
+         return 
+p_l_10      
+        loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+        loadi curtain_i
+         gosub nv_config_parameters 
+         gosubifxlt 3,set_item_inactive
+               
+         setmem data_type,5
+         setmem M_min_int,0 
+         setmem M_max_int,99   
+         return 
+p_l_11     
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 2,set_item_inactive
+         
+        loadi curtain_i
+         gosub nv_config_parameters 
+         gosubifxlt 4,set_item_inactive
+               
+         setmem data_type,5
+         setmem M_min_int,0 
+         setmem M_max_int,99   
+         return 
+        
+p_l_12
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 1,set_item_inactive
+         
+         loadi curtain_i
+         gosub nv_config_parameters 
+         goifxlt 1,set_item_inactive 
+        
+          setmem data_type,0
+         setmem M_min_int,10 
+         setmem M_max_int,102   
+         return 
+
+p_l_13 
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 1,set_item_inactive
+         
+         loadi curtain_i
+         gosub nv_config_parameters 
+         goifxlt 1,set_item_inactive 
+        
+          setmem data_type,0
+         setmem M_min_int,10 
+         setmem M_max_int,255   
+         return  
+
+p_l_14
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 1,set_item_inactive
+         
+         loadi curtain_i
+         gosub nv_config_parameters 
+         goifxlt 1,set_item_inactive 
+        
+          setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,100  
+         return   
+
+p_l_15 
+       
+         loadi con_sensor 
+         gosub nv_config_parameters 
+         goifxne 1,set_item_inactive
+         
+         loadi curtain_i
+         gosub nv_config_parameters
+         push
+         push 
+         goifxlt 1,set_item_inactive 
+         store  M_max_int
+         setmem data_type,0
+         setmem M_min_int,0 
+        
+         return   
+p_l_16
+p_l_17
+p_l_18
+p_l_19
+        gosub set_item_inactive
+        return
+
+p_l_20    
+         gosub p_check_if_any_fan_exist       
+         
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,120    
+         return    
+p_l_21     
+         loadi fan_i
+         gosub nv_config_parameters  
+         gosubifxlt 2,set_item_inactive
+         
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,120    
+         return 
+         
+        
+p_l_22    
+         loadi fan_i
+         gosub nv_config_parameters  
+         gosubifxlt 3,set_item_inactive
+
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,120   
+         return          
+
+p_l_23     
+         loadi fan_i
+         gosub nv_config_parameters  
+         gosubifxlt 4,set_item_inactive
+         
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,120    
+         return                  
+
+      
+p_l_24     
+         loadi fan_i
+         gosub nv_config_parameters  
+         gosubifxlt 5,set_item_inactive
+         
+         setmem data_type,0        
+         setmem M_min_int,1 
+         setmem M_max_int,120    
+         return    
+p_l_25   
+ 
+         loadi fan_i
+         gosub nv_config_parameters  
+         gosubifxlt 6,set_item_inactive
+         
+    
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,120    
+         return 
+
+
+p_l_26     
+         gosub p_check_if_any_fan_exist 
+         
+         setmem data_type,1        
+         setmem M_min_int,1 
+         setmem M_max_int,200   
+         return    
+p_l_27  
+         gosub p_check_if_any_fan_exist                   
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,60    
+         return 
+
+p_l_28    
+         gosub p_check_if_any_fan_exist 
+         gosub p_check_if_duty_cycle_exists
+         
+         setmem data_type,1
+         setmem M_min_int,1 
+         setmem M_max_int,254  
+         return 
+         
+
+
+p_l_29    
+         gosub p_check_if_any_fan_exist
+         gosub p_check_if_duty_cycle_exists
+         setmem data_type,1        
+         setmem M_min_int,1 
+         setmem M_max_int,254   
+         return    
+
+p_l_30
+p_l_31
+p_l_32
+p_l_33
+p_l_34  
+         goto set_item_inactive
+          return
+p_l_35      
+          
+          
+         gosub p_check_if_any_HVLS_exist
+         setmem data_type,0       
+         setmem M_min_int,1 
+         setmem M_max_int,100   
+         return    
+p_l_36   
+         gosub p_check_if_any_HVLS_exist
+         setmem data_type,0       
+         setmem M_min_int,1 
+         setmem M_max_int,100   
+         return    
+p_l_37  
+         gosub p_check_if_any_HVLS_exist
+         setmem data_type,0       
+         setmem M_min_int,1 
+         setmem M_max_int,100   
+         return    
+p_l_38  
+        gosub p_check_if_any_HVLS_exist
+         setmem data_type,0       
+         setmem M_min_int,0 
+         setmem M_max_int,11   
+         return    
+
+p_l_39
+        gosub set_item_inactive
+        return  
+        
+p_l_40  
+ 
+        gosub p_check_if_any_sprinkler_exist  
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,99    
+         return   
+         
+p_l_41  
+ 
+         gosub p_check_if_any_sprinkler_exist  
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,99    
+         return      
+         
+p_l_42  
+ 
+        gosub p_check_if_any_sprinkler_exist  
+         setmem data_type,1
+         setmem M_min_int,1 
+         setmem M_max_int,255    
+         return                           
+        
+p_l_43  
+ 
+        gosub p_check_if_any_sprinkler_exist  
+         setmem data_type,1
+         setmem M_min_int,1 
+         setmem M_max_int,255   
+         return      
+
+
+p_l_44  
+ 
+        gosub p_check_if_any_sprinkler_exist  
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,255   
+         return      
+p_l_45  
+ 
+        gosub p_check_if_any_sprinkler_exist  
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,255   
+         return      
+
+
+p_l_46  
+ 
+         loadi sprinkler_i
+         gosub nv_config_parameters 
+        gosubifxlt 2,set_item_inactive
+         
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,255   
+         return      
+p_l_47  
+ 
+          loadi sprinkler_i
+          gosub nv_config_parameters 
+          gosubifxlt 2,set_item_inactive
+        
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,255   
+         return      
+
+p_l_48  
+ 
+         gosub p_check_if_any_sprinkler_exist 
+         loadi  con_sensor
+         gosub nv_config_parameters 
+         goifxne 1,set_item_inactive
+        
+         setmem data_type,0
+         setmem M_min_int,1 
+         setmem M_max_int,94  
+         return      
+         
+p_l_49  
+ 
+        gosub p_check_if_any_sprinkler_exist 
+         loadi  con_sensor
+         gosub nv_config_parameters 
+         goifxne 1,set_item_inactive
+        
+         setmem data_type,4
+         setmem M_min_int,1 
+         setmem M_max_int,255   
+         return      
+         
+         
+p_l_50                                             ;49 
+ 
+        gosub p_check_if_any_sprinkler_exist 
+        loadi  con_sensor
+         gosub nv_config_parameters 
+         goifxne 1,set_item_inactive
+        
+         setmem data_type,4
+         setmem M_min_int,1 
+         setmem M_max_int,255   
+         return                        
+
+
+p_l_51                                         ;50
+         
+           gosub set_item_inactive   
+           return
+
+p_l_52
+         gosub check_if_TIV_exits 
+        
+         setmem data_type,0        
+         setmem M_min_int,0 
+         setmem M_max_int,99
+         return    
+p_l_53   
+       gosub check_if_TIV_exits      ;52  ,degress added if tiv triggered
+        
+         setmem data_type,0        
+         setmem M_min_int,0 
+         setmem M_max_int,20
+         return    
+p_l_54         
+        gosub check_if_TIV_exits       ;53
+       
+        
+         setmem data_type,0        
+         setmem M_min_int,1 
+         setmem M_max_int,24
+         return    
+p_l_55  
+p_l_56
+p_l_57        
+p_l_58   
+        
+p_l_59   gosub  set_item_inactive 
+        return
+        
+p_l_60    
+         loadi heater_i
+         gosub nv_config_parameters 
+         gosubifz set_item_inactive
+
+         setmem M_max_int,99      ;if interlock is off then max will be preset to 99°
+
+         loadi heater_interlock
+         gosub nv_config_parameters
+         push 
+         goifz P60skip_interlock 
+         
+         float 
+         floadq .1
+         fmul
+         fstore fscratchpad
+         
+         
+         
+         
+        loadi curtain_deadspan
+        gosub nv_curtain_parameters
+        float
+        floadq .1
+        fmul
+        frecallq fscratchpad
+        fadd        
+        fstore fscratchpad
+         
+       
+        loadi Curtain_1_temp
+        gosub nv_curtain_parameters
+        float
+        fwtoq
+        frecallw  fscratchpad
+        fsub 
+        fix
+        store M_max_int
+        
+P60skip_interlock       
+         setmem data_type,0        
+         setmem M_min_int,35 
+         return    
+
+p_l_61     
+         loadi heater_i
+         gosub nv_config_parameters 
+         gosubifxlt 2,set_item_inactive
+         
+          loadi heater_interlock
+         gosub nv_config_parameters
+         push 
+         goifz P61skip_interlock 
+         
+         float 
+         floadq .1
+         fmul
+         fstore fscratchpad
+         
+         
+         
+         
+        loadi curtain_deadspan
+        gosub nv_curtain_parameters
+        float
+        floadq .1
+        fmul
+        frecallq fscratchpad
+        fadd        
+        fstore fscratchpad
+         
+       
+        loadi Curtain_1_temp
+        gosub nv_curtain_parameters
+        float
+        fwtoq
+        frecallw  fscratchpad
+        fsub 
+        fix
+        store M_max_int
+        
+P61skip_interlock       
+         setmem data_type,0        
+         setmem M_min_int,35 
+         return    
+p_l_62     
+         loadi heater_i
+         gosub nv_config_parameters 
+         goifz set_item_inactive
+         
+         setmem data_type,1        
+         setmem M_min_int,1 
+         setmem M_max_int,150
+         return     
+ 
+      return
+
+
+
+
+check_if_TIV_exits    
+         sets   item_inactive
+         loadi sprinkler_i
+         gosub nv_config_parameters   
+         gosubift item_used    
+         loadi fan_i
+        gosub nv_config_parameters 
+         gosubift item_used   
+         return
+;--
+item_used 
+        clrs item_inactive
+        return
+
+
+
+;---
+
+p_check_if_duty_cycle_exists
+         loadi fan_1_Duty_c
+         gosub nv_config_parameters 
+         retift         
+         loadi fan_2_Duty_c
+         gosub nv_config_parameters
+         retift 
+         goto  set_item_inactive
+         return
+         
+;--- 
+p_check_if_any_fan_exist
+         loadi fan_i
+         gosub nv_config_parameters 
+         goifz set_item_inactive
+         return
+;---
+
+p_check_if_any_sprinkler_exist
+         loadi sprinkler_i
+         gosub nv_config_parameters 
+         goifz set_item_inactive
+         return    
+         
+p_check_if_any_HVLS_exist
+         loadi HVLS_output
+         gosub nv_config_parameters 
+         goifz set_item_inactive
+         return 
+;--------         
+set_item_inactive
+         sets   item_inactive
+         return
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+
+;------------------------M_------------------------------------ 
+M_get_parameter_label 
+            branchm currentmenu
+            target   m_config_label
+            target   m_par_label
+ 
+m_config_label
+           nvsetptr C_menu_text_ptr
+           gosub    display_text  
+           return  
+                      
+m_par_label
+           nvsetptr P_menu_text_ptr 
+           gosub    display_text  
+           return                               
+
+Display_text   
+                recall    smenuposition
+                decx
+                
+                nvsetreclen     3 
+                nvpoprecnum    
+                nvpushbyte      0               ;get left hand digit data
+               
+                loadx           255             ;display left hand digit data
+                outputm         5
+                
+                nvpushbyte      1               ;display middle digit data
+                loadx           255
+                outputm         13
+                
+                nvpushbyte      2               ;display right hand digit data
+                loadx           255
+                outputm         21
+                return
+;----------------------------------------------------------------------              
+M_get_setpoint_value
+           gosub M_find_ptr
+           gosub M_NV_value
+           return
+
+
+
+M_find_ptr
+            branchm  currentmenu
+            target   m_config_pointer_set
+            target   m_par_pointer_set
+ 
+m_config_pointer_set
+           nvsetptr  config_parameters
+           return  
+                      
+m_par_pointer_set
+           nvsetptr  P1_parameters 
+           return      
+
+M_NV_value  
+          recall    smenuposition
+          decx
+          xtoi
+          nvsetreclen 1
+          nvsetrecnum 0
+          invpushbyte 0
+          return 
+
+;--------------------------------------------- 
+            ;data_type 0 has no decimal
+            ;data_type 1 has the decimal point                                   
+            ;data_type 3 is No or YES
+            ;datatype  4 , is 0=100 so you can have minus sepoints
+            ;datatype  5 is diveded by 2 with a decimal point                                      
+      
+         floadw 100
+         fstore display_n_number
+LCD_display_number   
+        recall data_type
+        goifxeq 3,lCD_yes_no   
+        recall data_type
+        gosubifxeq 5,datatype_5_calc   
+        recall data_type
+        gosubifxeq 4,data_type_4_display_ready 
+        
+        frecallw Display_n_Number 
+        fgoifneg LCd_under_zero ;this displays the number if its below zero
+        floadq 100
+        fgoifwgeq Display_Ms_digit
+        loadx 0
+        loadx 255
+        outputm  5
+        goto    L_num_2_dig
+         
+
+Display_Ms_digit             ;3 digit display of a tenthed number        
+        frecallq     Display_n_Number
+        floadw 100
+        fdiv        
+        fix       
+        gosub           Get7seg
+        loadx           255
+        outputm         5   
+        
+        
+
+L_num_2_dig                    ;2 digit display
+       frecallw Display_n_Number
+        floadq .1
+        fmul 
+        fix       
+        float
+        fstore fscratchpad
+        floadq          .1
+        fmul 
+        fix
+        float
+        floadq 10
+        fmul         
+        frecallq           fscratchpad
+        fsub 
+        fix         
+        gosub           Get7seg
+        loadx           255
+        outputm         13   
+         
+L_num_3_dig                    ;2 digit display 
+        frecallw   Display_n_Number
+        floadq .10
+        fmul 
+        fix       
+        float
+        floadq          10
+        fmul 
+       
+        fwtoq      
+        frecallw    Display_n_Number  
+        fabs
+        fswap
+        fsub 
+        fix    
+        gosub           Get7seg        
+        loadx           255
+        outputm         21 
+        
+        goifmeq data_type,1,show_decimal_point
+        off 20 
+        return
+
+show_decimal_point
+       on 20
+       return
+
+
+LCd_under_zero
+       loadx 0 
+       loadx 255 
+       outputm 5 ;this turns all segments off
+       
+       on 11
+       gosub  L_num_2_dig
+       return    
+       
+;--------dattype 3, no or yes 
+lCD_yes_no
+       recall adjusted_int 
+       goift lcd_display_yes
+       
+       loadx 0 
+       loadx 255 
+       outputm 5
+       
+       loadx d_nn 
+       loadx 255 
+       outputm 13
+       
+       loadx d_oo 
+       loadx 255 
+       outputm 21
+       return
+                
+lcd_display_yes      
+       loadx D_Y 
+       loadx 255 
+       outputm 5
+       
+       loadx d_E 
+       loadx 255 
+       outputm 13
+       
+       loadx d_S 
+       loadx 255 
+       outputm 21 
+       return               
+;-----------  
+****** data type 4      ;-100 so a byte can be can be from -100 to +155
+; number needs to be in x and will be left in w 
+data_type_4_calc
+        float
+        fwtoq
+        floadw 100
+        fsub
+        return
+
+;set_datatype 4 for display
+data_type_4_display_ready
+       frecallq display_n_number  
+       floadw 100
+       fsub  
+       fstore display_n_number
+       return
+
+datatype_5_calc                    ;is mutipled by 5 then deciamal point is shifted for a /2 effect.
+       frecallq display_n_number  
+       floadw 5
+       fmul 
+       fstore display_n_number 
+       setmem data_type,1
+       return
+
+;**********************
+
+
+              
+;^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+;code to dispaly lcd data    
+
+
+                
+***************                
+* Subroutines *
+***************
+
+* Subroutine to turn all display segments off *
+
+AllOff          loadx           0
+                loadx           255
+                outputm         5
+                loadx           0
+                loadx           255
+                outputm         13
+                loadx           0
+                loadx           255
+                outputm         21
+                return
+                                
+
+                
+* Subroutine to return the 7 segment data for the number in X *
+
+Get7seg         nvsetptr        tab7seg
+                nvsetreclen     1
+                nvpoprecnum
+                nvpushbyte      0
+                return
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+;curtain logic
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$  
+
+curtain_I               equ 0     ;number of curtains    
+fan_I                   equ 1    ;number of fans in the system 
+sprinkler_I             equ 2    ;number of sprinklers in system 
+celcuis                 equ 3
+rain_close_seconds      equ 4 
+mph_deadspan            equ 5     ;.1 mph increments
+wind_minutes            equ 6   
+anemometer_cal          equ 7 
+fan_1_Duty_c            equ 8     ;true if fan #1 uses duty cycle
+fan_2_duty_c            equ 9     ; true if fan #2 uses duty cycle 
+con_sensor               equ 10    ;0=none sensor connected, 1 = humidity, 2=,amp,3=temp
+sprink_effectiv_temp    equ 11     ;true if sprinklers use effective tem    
+HVLS_output             equ 12     ;true if 0-10 volt is being used   
+amp_start_length         equ 13     ;time for motor startup
+amp_start_additional     equ 14      ;amp mutiplier
+overload_retry           equ 15      ;how often a curtain will retry before it os overloaded
+amp_meter_cal            equ 16     ;amp meter multiplier
+amp_dithering            equ 17     ;how many amp meter readings will be used for amp reading
+heater_i                 equ 18
+heater_interlock         equ 19
+
+
+Curtain_1_temp           equ 0
+Curtain_2_temp           equ 1
+curtain_3_temp           equ 2
+curtain_4_temp           equ 3
+curtain_runtime          equ 4
+curtain_pause_interval   equ 5
+curtain_deadspan         equ 6 
+motor_1_overload        equ 7  
+motor_2_overload        equ 8
+motor_3_overload        equ 9
+motor_4_overload        equ 10 
+
+curtain_max_humidity    equ 11
+humidity_open_sec       equ 12
+humidity_kill_temp      equ 13
+humidity_curtain        equ 14  
+
+
+
+fan_1_temp               equ 19
+fan_2_temp               equ 20
+fan_3_temp               equ 21
+fan_4_temp               equ 22
+fan_5_temp               equ 23
+fan_6_temp               equ 24
+fan_deadspan             equ 25                   
+fan_Max_mph              equ 26
+duty_c_off_time          equ 27
+duty_c_on_time           equ 28 
+fan_max_humidty          equ 29
+fan_humidity_kill_temp   equ 30
+fan_humidity_deadspan    equ 31
+
+hvls_low_temp              equ 34
+hvls_high_temp             equ 35   
+hvls_low_speed_rate        equ 36
+hvls_manual_rate           equ 37
+ 
+
+Sprinkler_on_temp      equ  39
+sprinkler_high_temp    equ  40
+low_wait_minutes       equ  41
+High_wait_minutes      equ  42
+sprink_1_low_seconds   equ  43
+sprink_1_high_seconds  equ  44
+sprink_2_low_seconds   equ  45
+sprink_2_high_seconds  equ  46
+RH_comp_start          equ  47  ;RH at which it begins to adjust      ,
+dryoff_adjust          equ  48 ;% dryofftime adjustment at 95% humidity     ,datatype 4 
+spray_adjust           equ  49;%spray time  adjustment at 95% Humidity      ;datatypr 4
+;                     equ  50 ;true or false                                ;datatype 3 ,yes or no
+ 
+av_temp_trigger          equ 51  ;temp triggered abovr this
+temp_trig_level          equ 52  ;how many degrees are added if av temp above X
+Av_temp_hours            equ 53   ;hours used in avegae temp
+humidity_ramp_low        equ 54  ;starting humidity for effectivr temp
+eff_humidity             equ 55;how many degrees are added to effective temp at 95 RH   
+
+
+heater_temp              equ  59  ;heater #1 setpoint
+heater_2                ;equ 60 but is only accessed via indexing
+heater_deadspan          equ 61  ;deadspan for heaters
+ 
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$  
+
+
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+nv_curtain_parameters
+     nvsetptr P1_parameters
+     nvsetreclen 1
+     nvsetrecnum 0
+ noj:invpushbyte 0
+     return   
+
+nv_config_parameters 
+     nvsetptr config_parameters 
+     nvsetreclen 1
+     nvsetrecnum 0
+ noj:invpushbyte 0
+     return       
+
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$    
+
+JtoI            ;lack of jtox
+      branchj
+      target i0
+      target i1
+      target i2
+      target i3 
+
+i0 loadi 0 
+   return
+
+i1 loadi 1
+   return
+
+i2 loadi 2
+   return
+
+i3 loadi 3
+   return  
+;$$$$$$$$$$$$$$$$$$$$$$$
+adjustcurtainruntime
+     loadi curtain_runtime
+     gosub  nv_curtain_parameters
+     float
+adjust_for_rain ;this is where the rain logic jumps in and sets its time      
+     floadq 10
+     fmul
+     fsettimer curtain_run_timer
+      return
+;$$$$$$$$$$$$$$$$$$$$$$$ 
+wait_for_deadtime 
+            loadi   curtain_pause_interval 
+            gosub nv_curtain_parameters 
+            float               ;minutes in 6 second incroments or .1 minute
+            floadq      60     ;
+            fmul  
+            fsettimer  2
+loopingfordeadtime
+            yieldtask  
+                                                          
+                                          
+get_wait_time ;this is where the curtains start after it has stopped raining         
+            test 2     
+            goift loopingfordeadtime
+            goto    checkamountofmotorsrunning
+              ;if time has not elapsed then it keeps waiting
+            ; goto deadtime0 ;!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! testing only
+             
+  
+         
+               
+                 
+                          
+;-----------------------------------------------------------
+;this is the logic which closes the curtains
+;it is 2nd place which operates the outputs             
+
+Rain_closing_curtain 
+               yieldtask
+           noj:recall maxmotors
+
+               goift Rain_closing_curtain
+ 
+          noj:incm maxmotors
+              loadi rain_close_seconds
+              gosub nv_config_parameters 
+              float
+              gosub  adjust_for_rain   ;almost the same as adjustcurtainruntime
+              
+               gosub get_curtain_relay_number              
+          iasj:sets 0,outputbitsmem 
+         
+              
+rain_closing_loop
+              yieldtask  
+              gosub      Check_rain_status 
+              goiff      rain_stop_motor
+              test       curtain_run_timer              
+              goift      rain_closing_loop
+
+rain_stop_motor 
+             gosub get_curtain_relay_number 
+        iasj:clrs 0,outputbitsmem 
+         noj:decm maxmotors
+             sets 0,raining_for_curtains; these bits signifiy the curtain has shut already from the rain
+             goto wait_for_deadtime
+    
+
+;------------------------------------------------------------------
+
+curtain_start_point  
+            pause 1000
+
+checkamountofmotorsrunning   
+            yieldtask
+        noj:recall   maxmotors ; q is most that should be running w is how many are   
+            goifnz   checkamountofmotorsrunning  
+                                                 
+                                           
+                                                 
+actuall_temperature_check
+   
+            gosub   JtoI
+            gosub   nv_curtain_parameters ; the first parameters are the temperature settings
+            float  
+        noj:fstore fscratchpad
+    
+        noj:frecallq temperature   
+             
+
+            fcomparer
+            branchr ;           q is temp       ,w is SP
+            target CNVLendtask  
+            target CNVLcheckiftoocool           
+            target CNVLtoowarm
+            
+            
+          
+
+CNVLcheckiftoocool
+   
+
+
+       loadi curtain_deadspan 
+       gosub nv_curtain_parameters
+       float
+       floadq .10 ;dead span is in .10 degree increments
+       fmul
+   noj:frecallq fscratchpad   
+       fsub   ; sub deadspan       q                   w
+                                  ;temperature         SP
+   
+   noj:frecallq temperature        
+       fcomparer
+       branchr
+       target CNVLendtask
+       target CNVLtoocold
+       target CNVLendtask
+       target CNVLendtask
+   
+
+CNVLendtask
+       GoSub     Humidity_check            ; checks if curtain should open for humidity     
+       RecallS 0,humid_for_curtains
+       GoIfT     CNVLendtask_end        ;checking if it has already opened from humdity
+   noj:GoIfST too_humid,Run_curtain_open__for_humidity ;will open for humidity, has already checked if its opened 
+CNVLendtask_end                
+       ClrInstCount
+       goto wait_for_deadtime  
+;---------------------
+CNVLtoowarm 
+      
+   noj:sets Dcurtain_direction_bit
+        goto curtain_run_code
+;---------------------------------
+CNVLtoocold     
+       GoSub Humidity_check        
+       RecallS 0,humid_for_curtains  ;if it has aleady opened  
+   noj:recalls too_humid
+       and
+       goift CNVLendtask  ;will not allow it to close if it aleady has closed
+  
+  noj:GoIfST too_humid,Run_curtain_open__for_humidity ;will open for humidity, has already checked if its opened 
+       clrs  0,humid_for_curtains  ;if it got here can only be if it has not ran & is not humid 
+   noj:clrs Dcurtain_direction_bit 
+       goto curtain_run_code  
+
+;-------------------
+Run_curtain_open__for_humidity 
+       recall curtainOFF
+       goift loopingfordeadtime  
+       
+    noj:SetS Dcurtain_direction_bit  ;sets bit so curtain will open
+        LoadI humidity_open_sec
+        GoSub  nv_curtain_parameters
+        fLOAT
+        GoSub adjust_for_rain
+        sets  0,humid_for_curtains
+        GoTo  humidity_run_jumpin_point 
+
+;-----------------------------   
+   
+curtain_run_code   
+       recall curtainOFF
+       goift loopingfordeadtime
+       gosub adjustcurtainruntime
+humidity_run_jumpin_point
+   noj:incm maxmotors
+       
+      
+  
+       gosub    get_curtain_relay_number
+                                  
+    noj:goifst  Dcurtain_direction_bit,curtain_open  ;closing curtain code  
+    iasj:sets 0,outputbitsmem                              ;the close relay is is first
+         goto curtain_wait_until_done_running
+
+
+curtain_open                                         ;opening the curtain code
+    iasj:sets 1,outputbitsmem     
+        goto curtain_wait_until_done_running
+        
+curtain_wait_until_done_running
+        yieldtask   
+      
+        test curtain_run_timer
+        goift     curtain_wait_until_done_running
+        
+       
+        
+turn_motor_off      
+         gosub    get_curtain_relay_number   
+     iasj:clrs 0,outputbitsmem   
+     iasj:clrs 1,outputbitsmem
+        pause 100
+    noj:decm maxmotors
+        goto wait_for_deadtime
+           
+;----------------------------------------
+;this is multiplexer 
+;----------------------------------------   
+get_curtain_relay_number
+        gosub jtoi
+        itox
+        float
+        floadq 2
+        fmul
+        fix
+        xtoi
+        return
+;----------------------------------------------   
+
+
+                                        
+;------
+
+
+
+  
+
+;--------
+
+get_curtains_max_amps 
+         
+      nvsetptr  P1_parameters
+      nvsetreclen 1
+      nvsetrecnum 0
+      nvpushbyte motor_1_overload  ; jindexed
+      push 
+      return
+                     
+                     
+                     
+                     
+                     
+
+  
+ 
+;    
+;----------------                   
+;this sub checks if motor exceded maximum tries for the direction it is trying to go                    
+
+
+
+
+
+
+;********************************************   
+;rain status, if it stops raining the curtain will stop closing. Even if the rain time 
+;has not fully elapsed. rain time is the maximum it will close at one shot.
+Check_rain_status  
+       loadx 0
+       return
+       
+       
+      gosub jtoi
+Check_rain_lcd ;the lcd logic comes here to tell if its raining
+      itox       
+      branch
+      target Rain_C_1
+      target Rain_C_2
+      target Rain_C_3
+      target Rain_C_4
+      
+     
+No_rain
+      loadx 0 
+  
+      return 
+      
+Raining_right_now
+      loadx 255
+      return           
+
+Rain_c_1  
+   noj:goifinon 0,Raining_right_now
+      goto    No_rain; if its not raining it goes to no rain
+ 
+Rain_c_2  
+   noj:goifinon 1,Raining_right_now
+      goto    No_rain; if its not raining it goes to no rain  
+      
+Rain_C_3   
+         noj:goifsf  wind_disabled,No_rain ;if wind is not disabled, it must not check rain because inputs 3 is shared with wind
+      noj:goifinon 2,Raining_right_now
+          goto    No_rain; if its not raining it goes to no rain 
+
+Rain_C_4
+    noj:goifinon 3,Raining_right_now
+        goto    No_rain; if its not raining it goes to no rain       
+       
+;
+;x will be true if curtain should open for humditity
+;false if no effect
+too_humid              defSEM 
+humidity_already_opened defSEM
+ 
+
+Humidity_check 
+        
+         loadi  humidity_curtain
+         gosub  nv_curtain_parameters
+         decx   ;make it 1 based
+         push
+         gosub  jtoi ;X = current curtain
+         itox       ;Y= curtain that is affected by humidity
+         TestXeqY
+         GoIfF   no_response_for_humidity;if not same curtain
+         
+         
+         LoadI      humidity_kill_temp
+         GoSub      nv_curtain_parameters 
+         fLOAT                   ;w is setpoint
+     noj:fRecallQ   temperature  ;Q is temperature
+         fGOIFWGTQ  no_response_for_humidity    ;if temp is below setpoint humidity response is locked out
+         
+         LoadI      curtain_max_humidity
+         GoSub      nv_curtain_parameters    ;Y equal setpoint
+     noj:Recall     humidity                 ;X equals humidity
+         TestXgeY
+         GoIfT      open_for_humidity
+         GoTo       no_response_for_humidity
+         
+         
+open_for_humidity 
+
+     noj:SetS      too_humid
+         return
+
+no_response_for_humidity
+     noj:ClrS      too_humid     
+         Return         
+         
+;:*********************************************************             
+;     fan logic
+;---------------------------------------------------------
+
+
+  
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$  
+duty_cycle_clock   deftime24   
+duty_cycle_bit     defsem   ;bit will be true if duty cycle is on
+
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$   
+
+duty_cycle_start_point           ;this task runs continuosly, set a duty cycle bit, when bit is true then duty cycle fans must be on regardless
+      marktime
+duty_c_off_time_loop 
+       yieldtask
+       clrs  duty_cycle_bit
+       loadi  duty_c_off_time
+       gosub  nv_curtain_parameters
+       float
+       floadq 600
+       fmul
+       fwtoq 
+       fstsincemark  
+       fsub
+       fgoifpos  duty_c_off_time_loop
+       
+       marktime
+duty_c_on_time_loop      
+       yieldtask
+       sets  duty_cycle_bit
+       loadi  duty_c_on_time
+       gosub  nv_curtain_parameters
+       float
+       floadq 600
+       fmul
+       fwtoq 
+       fstsincemark  
+       fsub
+       fgoifpos  duty_c_on_time_loop
+
+       goto duty_cycle_start_point
+
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$  
+fan_max_wind     deffloat
+fans_warm_enough defsem ;will be true if its warm enough 
+fans_too_cold     defsem; will be true if the temperature is too cold (including deadspan)
+fans_too_windy   defsem ;will be true if its too windy for fans  
+fans_not_windy   defsem ;will be true if there is not enough wind to turn fans off (including deadspan )  
+k_index          defbyte;which fan is the current instance 
+fan_output_I     defbyte; starting output point for fans  
+fan_too_humid    defbyte,2 ; uses bytes for easier indexing
+reset_fan_index
+         loadi fan_i
+         gosub nv_config_parameters
+         store k_index 
+         
+         loadi curtain_i      ;it rewrites the starting point each loop
+         gosub nv_config_parameters 
+         float
+         floadq 2    ;mutipling # of curtains x 2 to find out how many relays are left over
+         fmul 
+         fix   
+         store  fan_output_I ;output for first fan
+         return
+
+fan_start_point
+
+fan_main_loop
+        yieldtask  
+         recall k_index
+         gosubiff  reset_fan_index 
+         decm k_index
+         
+         clrs  fans_warm_enough
+         clrs fans_too_cold
+        
+        gosub check_fan_humidity
+       
+      
+        recall  fan_too_humid
+        goift   c_fan_turns_on
+        
+        gosub check_temperature
+        yieldtask  
+        
+        recalls  fans_too_cold  ;will be true if its warm enough
+        goift c_fan_turns_off
+      
+     
+      recalls fans_warm_enough 
+      goift c_fan_turns_on 
+     
+      goto fan_main_loop
+        
+        
+       
+c_fan_turns_on 
+        recall K_index  
+        float
+        fwtoq 
+        recall fan_output_I
+        float
+        fadd
+        fix        
+        xtoi
+   iasJ:recalls 0,outputbitsmem
+        goift   fan_main_loop ;so it does not wait if it is on already   
+   iasj:sets 0,outputbitsmem  
+        pause 500
+        goto   fan_main_loop
+
+c_fan_turns_off 
+        recall K_index  
+        float
+        fwtoq 
+        recall fan_output_I
+        float
+        fadd
+        fix        
+        xtoi
+   iasJ:recalls 0,outputbitsmem
+        goiff   fan_main_loop ;so it does not wait if it is off already  
+    iasj:clrs 0,outputbitsmem;digital output for the relay  
+         pause 100
+         goto  fan_main_loop
+
+;------------------
+check_duty_cycle                 ;this sub checks if fans uses duty cycle and then if duty cycle is active. if fan should be on x=true
+          recall k_index            ;only first 2 fans can check duty cycle
+          branch
+          target Check_d_c_1
+          target Check_d_c_2
+          target Check_d_c_3
+          target Check_d_c_3
+          target Check_d_c_3
+          target Check_d_c_3
+
+Check_d_c_1
+          loadi   fan_1_Duty_c
+          gosub   nv_config_parameters
+          goiff   No_duty_cycle
+          recalls  duty_cycle_bit
+          goift   Yes_duty_cycle
+          goto    No_duty_cycle
+
+
+Check_d_c_2
+          loadi   fan_2_Duty_c
+          gosub   nv_config_parameters
+          goiff   No_duty_cycle
+          recalls  duty_cycle_bit
+          goift   Yes_duty_cycle
+          goto    No_duty_cycle
+
+Check_d_c_3 
+         goto   No_duty_cycle
+      
+
+Yes_duty_cycle
+         loadx 255
+         return
+
+No_duty_cycle
+         loadx 0
+         return
+;------------------------------
+              floadw 3
+;              fstore wind
+ ;             floadw 75
+ ;             fstore fan_temp
+         
+;----------------       
+check_wind
+        gosub get_mph
+        frecallw wind
+        frecallq fan_max_wind
+        fgoifwgeq too_windy_for_fan
+   
+        loadi mph_deadspan
+        gosub nv_config_parameters
+        float      
+        floadq .1
+        fmul
+        frecallq fan_max_wind
+        fsub
+        frecallq wind
+        fsub
+        fgoifpos wind_in_deadspan   
+
+not_enough_wind_too_keep_fan_off         
+       sets fans_not_windy  
+       return 
+        
+wind_in_deadspan
+       return      
+       
+
+too_windy_for_fan
+       sets fans_too_windy
+       return
+        
+ ;       floadw 64
+ ;       fstore fan_temp
+;----------
+get_mph      
+        loadi fan_Max_mph              
+        gosub   nv_curtain_parameters
+        float
+        fstore fan_max_wind
+        return
+                                
+                                
+          floadw 61.3                     
+         fstore temperature                       
+                                
+;******************************8        
+check_temperature
+       recall k_index
+       float
+       fwtoq
+       loadx fan_1_temp
+       float
+       fadd
+       fix
+       xtoi    
+       gosub   nv_curtain_parameters      
+       float  
+       fstore fscratchpad   ;fan setpoint
+       frecallq effective_temp
+       fsub  
+       fgoifpos Check_warm_enough_to_run_fan
+            
+       loadi fan_deadspan
+       gosub nv_curtain_parameters
+       float
+       floadq .1
+       fmul
+       
+   
+       frecallq fscratchpad
+       fsub 
+       frecallq effective_temp
+       fsub
+       fgoifpos chech_temp_in_deadspan
+ 
+check_too_cold_for_fan
+       sets fans_too_cold
+
+chech_temp_in_deadspan
+       return        
+      
+ 
+Check_warm_enough_to_run_fan 
+       sets fans_warm_enough
+       return
+
+;*******************\
+check_fan_humidity
+      recall     k_index
+      goifnz    fan_humidity_low     ;if not the first fan  humidity will be bypassed
+      
+      loadi     fan_humidity_kill_temp
+      gosub      nv_curtain_parameters  
+      float
+      frecallq  temperature
+      fgoifwgtq  fan_humidity_low   ;if temp was below kill temp humidity will be bypassed
+      
+      recall     humidity
+      float
+      fwtoq        ;q is humidity
+      loadi       fan_max_humidty 
+      gosub      nv_curtain_parameters
+      float      ;w is max humidty
+      fgoifwgtq   fan_humidity_high  
+      
+      fwtoq      ;humidity setpoint now is in q       
+      loadi      fan_humidity_deadspan 
+      gosub      nv_curtain_parameters  
+      float
+      fsub      
+      fwtoq      ;humidity that no longer affects the fan (setpoint minus deadspan)
+      recall     humidity
+      float       ;w is humdity, q is minumum humidty
+      fgoifwltq    fan_humidity_low
+      goto        humidity_in_deadspan
+      
+humidity_in_deadspan
+      return      
+         
+
+fan_humidity_high 
+     recall k_index
+     xtoi
+    isetmem  fan_too_humid,255
+     return
+fan_humidity_low
+     recall k_index
+     xtoi
+    isetmem  fan_too_humid,0
+     return
+      
+;-------------------end of sprinkler code---------------------;
+variable_1   deffloat
+
+               
+;------- variable speed logic------------
+;hvls_low_temp              equ 0
+;hvls_high_temp             equ 1   
+;hvls_low_speed_rate        equ 2
+;hvls_manual_rate           equ 3
+;--------------------------------------------------------------------------------------------------
+Variable_speed_outputs
+        yieldtask  
+
+       loadi          hvls_manual_rate
+       gosub          nv_curtain_parameters
+       gosubifxlt 11,manual_hvls_speed_set 
+        
+       loadi            hvls_manual_rate
+       gosub            nv_curtain_parameters  
+       gosubifxeq 11,variable_speed_set 
+         
+
+        goto            Variable_speed_outputs
+
+       setmem          effective_temp,50
+  
+variable_speed_set    
+       loadi hvls_high_temp
+       gosub nv_curtain_parameters
+       float
+       fwtoq
+       loadi hvls_low_temp
+       gosub nv_curtain_parameters
+       float
+       fsub 
+       fstore fscratchpad
+       
+       loadi hvls_low_speed_rate 
+       gosub nv_curtain_parameters
+       float
+       floadq 100
+       fsub    
+       fwtoq
+       
+       
+       frecallw fscratchpad
+           
+       fdiv
+       fstore fscratchpad ;now has units of variation per degree
+
+       frecallq effective_temp
+      
+       loadi hvls_low_temp
+       gosub nv_curtain_parameters
+       float
+       fsub
+       fgoifneg variable_fan_off
+       frecallq fscratchpad
+       fmul
+       floadq .01
+       fmul  
+       fstore fscratchpad
+       
+       loadi hvls_low_speed_rate 
+       gosub nv_curtain_parameters
+       float
+       floadq .01
+       fmul
+       frecallq fscratchpad
+       fadd
+          
+       fanout 2
+       return      
+
+variable_fan_off
+       loadi hvls_low_speed_rate 
+       gosub nv_curtain_parameters
+       float
+       floadq .01
+       fmul
+       fanout 2
+       return
+
+;manual speed is on output 2
+manual_hvls_speed_set    
+       loadi hvls_manual_rate
+       gosub nv_curtain_parameters
+       float
+       floadq .1
+       fmul
+       fanout 2 ;if manual speed is set to then then its in automatic
+       return                  
+
+             
+;#####################################################################
+;##### heater logic                  
+h_index                 defbyte
+heater_warm_enough      defsem                 
+heater_too_cold         defsem
+ 
+heater_relay
+      loadi curtain_I
+      gosub nv_config_parameters
+      float
+      floadq 2
+      fmul
+      fwtoq
+         
+      loadi fan_I
+      gosub nv_config_parameters
+      float
+      fadd
+      fwtoq 
+      
+      loadi sprinkler_I
+      gosub nv_config_parameters
+      float
+      fadd
+      fwtoq
+      
+      recall h_index
+      float
+      fadd
+      fix
+      xtoi   
+      return                  
+ 
+reset_heater_index  
+
+         loadi heater_i
+         gosub nv_config_parameters
+         store h_index           ;sets the current heater index again
+         return  
+ 
+ 
+ 
+ 
+ 
+ 
+heater_start_point
+         pause 400
+ 
+ 
+                   
+heater_start_loop
+ 
+         yieldtask  
+         recall h_index
+         gosubiff  reset_heater_index 
+         decm h_index
+         
+         clrs  heater_warm_enough
+         clrs heater_too_cold
+         
+         gosub check_heater_temperature
+         yieldtask
+     
+         recalls heater_too_cold
+         goift   turn_heater_on
+         recalls heater_warm_enough 
+         goift   turn_heater_off 
+         goto    heater_start_loop
+ 
+turn_heater_on
+         gosub heater_relay
+    iasj:sets 0,outputbitsmem
+         goto  heater_start_loop
+ 
+turn_heater_off
+         gosub heater_relay
+    iasj:clrs 0,outputbitsmem
+         goto  heater_start_loop
+        
+       
+             
+             
+        floadw 69.1
+        fstore temperature     
+;----------------------------
+check_heater_temperature
+       recall h_index
+       float
+       fwtoq
+       loadx heater_temp
+       float
+       fadd
+       fix
+       xtoi    
+       gosub   nv_curtain_parameters      
+       float  
+       fstore fscratchpad   ;heater setpoint , if colder than this heater will be on
+       frecallq temperature ;temperature
+       fgoifwgtq Turn_heater_flag_on
+            
+       loadi heater_deadspan
+       gosub nv_curtain_parameters
+       float
+       floadq .1
+       fmul
+       
+   
+       frecallq fscratchpad
+       fadd     ;w is temp at which heater will be off 
+       frecallq temperature
+       fgoifwgtq  heater_temp_in_deadspan    
+
+turn_heater_flag_off
+       sets heater_warm_enough
+       return               
+ 
+Turn_heater_flag_on
+       sets     heater_too_cold    
+       return
+
+heater_temp_in_deadspan
+       return        
+      
+;---------------------------------------------------------------------------------- 
+
+                   
+                   
+                   
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$4
+;$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+          
+d_0             equ         %00111111       ;0
+d_1             equ         %00000110       ;1
+d_2             equ         %01011011       ;2
+d_3             equ         %01001111       ;3
+d_4             equ         %01100110       ;4
+d_5             equ         %01101101       ;5
+d_6             equ         %01111101       ;6
+d_7             equ         %00000111       ;7
+d_8             equ         %01111111       ;8
+d_9             equ         %01101111       ;9  
+d_C            equ          %00111001       ;10 leds for a large C
+d_A            equ          %01110111       ;11 leds for a large A
+d_E             equ          %01111001       ;12 leds for a large E
+d_F             equ          %01110001       ;13 leds for a large F 
+d_P             equ          %01110011       ;14 leds for a large P
+d_Y             equ          %01101110
+d_S             equ         %01101101
+d_nn            equ          %01010100
+d_oo            equ          %01011100
+D_rr            equ          %01010000
+D_hh            equ          %01110100
+D_cc            equ          %01011000
+  
+      nvem0
+
+  
+********
+* NVEM *
+********    
+tab7seg         
+                nv0byte         %00111111       ;0
+                nv0byte         %00000110       ;1
+                nv0byte         %01011011       ;2
+                nv0byte         %01001111       ;3
+                nv0byte         %01100110       ;4
+                nv0byte         %01101101       ;5
+                nv0byte         %01111101       ;6
+                nv0byte         %00000111       ;7
+                nv0byte         %01111111       ;8
+                nv0byte         %01101111       ;9
+
+
+end_of_menu_text
+           nv0byte %01111001,%01010100,%01011110
+
+
+C_menu_text_ptr 
+           nv0byte  d_c,d_1,0
+           nv0byte  d_c,d_2,0
+           nv0byte  d_c,d_3,0
+           nv0byte  d_c,d_4,0
+           nv0byte  d_c,d_5,0 
+           nv0byte  d_c,d_6,0 
+           nv0byte  d_c,d_7,0
+           nv0byte  d_c,d_8,0
+           nv0byte  d_c,d_9,0 
+           nv0byte  d_c,d_1,d_0 
+           nv0byte  d_c,d_1,d_1
+           nv0byte  d_c,d_1,d_2
+           nv0byte  d_c,d_1,d_3
+           nv0byte  d_c,d_1,d_4 
+           nv0byte  d_c,d_1,d_5 
+           nv0byte  d_c,d_1,d_6
+           nv0byte  d_c,d_1,d_7
+           nv0byte  d_c,d_1,d_8
+           nv0byte  d_c,d_1,d_9
+           nv0byte  d_c,d_2,d_0 
+           nv0byte  d_c,d_2,d_1 
+           nv0byte  d_c,d_2,d_2
+           nv0byte  d_c,d_2,d_3
+           nv0byte  d_c,d_2,d_4
+           nv0byte  d_c,d_2,d_5
+           nv0byte  d_c,d_2,d_6
+P_menu_text_ptr
+           nv0byte  d_p,d_1,0
+           nv0byte  d_p,d_2,0
+           nv0byte  d_p,d_3,0       
+           nv0byte  d_p,d_4,0
+           nv0byte  d_p,d_2,0
+           nv0byte  d_p,d_3,0    
+           nv0byte  d_p,d_4,0
+           nv0byte  d_p,d_8,0
+           nv0byte  d_p,d_9,0    
+           nv0byte  d_p,d_1,d_0
+           nv0byte  d_p,d_1,d_1
+           nv0byte  d_p,d_1,d_2
+           nv0byte  d_p,d_1,d_3
+           nv0byte  d_p,d_1,d_4
+           nv0byte  d_p,d_1,d_5  
+           nv0byte  d_p,d_1,d_6
+           nv0byte  d_p,d_1,d_7
+           nv0byte  d_p,d_1,d_8
+           nv0byte  d_p,d_1,d_9
+           nv0byte  d_p,d_2,d_0
+           nv0byte  d_p,d_2,d_1   
+           nv0byte  d_p,d_2,d_2
+           nv0byte  d_p,d_2,d_3
+           nv0byte  d_p,d_2,d_4
+           nv0byte  d_p,d_2,d_5
+           nv0byte  d_p,d_2,d_6
+           nv0byte  d_p,d_2,d_7  
+           nv0byte  d_p,d_2,d_8
+           nv0byte  d_p,d_2,d_9
+           nv0byte  d_p,d_3,d_0
+           nv0byte  d_p,d_3,d_1
+           nv0byte  d_p,d_3,d_2
+           nv0byte  d_p,d_3,d_3        
+           nv0byte  d_p,d_3,d_4
+           nv0byte  d_p,d_3,d_5
+           nv0byte  d_p,d_3,d_6
+           nv0byte  d_p,d_3,d_7
+           nv0byte  d_p,d_3,d_8
+           nv0byte  d_p,d_3,d_9  
+           nv0byte  d_p,d_4,d_0
+           nv0byte  d_p,d_4,d_1
+           nv0byte  d_p,d_4,d_2
+           nv0byte  d_p,d_4,d_3
+           nv0byte  d_p,d_4,d_4
+           nv0byte  d_p,d_4,d_5
+           nv0byte  d_p,d_4,d_6
+           nv0byte  d_p,d_4,d_7
+           nv0byte  d_p,d_4,d_8
+           nv0byte  d_p,d_4,d_9
+           nv0byte  d_p,d_5,d_0
+           nv0byte  d_p,d_5,d_1  
+           nv0byte  d_p,d_5,d_2
+           nv0byte  d_p,d_5,d_3
+           nv0byte  d_p,d_5,d_4
+           nv0byte  d_p,d_5,d_5
+           nv0byte  d_p,d_5,d_6
+           nv0byte  d_p,d_5,d_7
+           nv0byte  d_p,d_5,d_8
+           nv0byte  d_p,d_5,d_9
+           nv0byte  d_p,d_5,0
+           nv0byte  d_p,d_6,0
+           nv0byte  d_p,d_7,0
+           nv0byte  d_p,d_6,d_3  
+           nv0byte  d_p,d_6,d_4
+           nv0byte  d_p,d_6,d_5
+           nv0byte  d_p,d_6,d_6
+           nv0byte  d_p,d_6,d_7
+           nv0byte  d_p,d_6,d_8
+           nv0byte  d_p,d_6,d_9                        
+       nv0space 2000
+
+
+P1_parameters   nv0byte 80 ;0 temperature setting for curtain 1
+                nv0byte 45 ;1 temperature setting for curtain 2  
+                nv0byte 45 ;2 temperature setting for curtain 3
+                nv0byte 45 ;3 temperature setting for curtain 4
+                nv0byte 20 ;4 seconds the curtain will run when enegized
+                nv0byte 5  ;5 minutes the curtain will wait between runs
+                nv0byte 30 ;6 the temperature deadspan for the curtains
+                nv0byte 9  ;7 ;curtain 1 max amps
+                nv0byte 10  ;8 ;curtain 2 max amps
+                nv0byte 11  ;9 ;curtain 3 max amps
+                nv0byte 12  ;10 curtain 4 max amps
+                nv0byte 80  ;11curtain_max_humidity  
+                nv0byte 20  ;12 humidity_open_sec
+                nv0byte 32  ;13 humidity_kill_temp
+                nv0byte 1  ;14 humidity_curtain
+                nv0byte 1  ;15
+                nv0byte 1  ;16
+                nv0byte 1  ;17
+                nv0byte 1  ;18 
+                nv0byte 60 ;19 Temperature at which the fan 1 will start
+                nv0byte 62 ;20 Temperature at which the fan 2 will start
+                nv0byte 65 ;21 Temperature at which the fan 3 will start
+                nv0byte 67 ;22Temperature at which the fan 4 will start
+                nv0byte 69 ;23 Temperature at which the fan 5 will start
+                nv0byte 71 ;24 Temperature at which the fan 6 will start   
+                nv0byte 35 ;25 Deadspan for fan  
+                nv0byte 12 ;26 Max wind for fans 
+                nv0byte 20 ;27 .1 minute increments ,duty cycle OFF time for fan
+                nv0byte 20  ;28 .1 minute increments ,duty cycle ON time for fan
+                nv0byte 80 ;29 humidity at which fan will start
+                nv0byte 32 ;30 don't use humidity below this temperature
+                nv0byte 3 ;31  humidity despan
+                nv0byte 60 ;32
+                nv0byte 150;33 
+                nv0byte 60 ;34   hvls_low_temp
+                nv0byte 80 ;35   hvls_high_temp  
+                nv0byte 15  ;36   hvls_low_speed_rate
+                nv0byte 11  ;37   hvls_manual_rate  
+                nv0byte 1  ;38
+                nv0byte 71  ;39  ;sprinkler on temp
+                nv0byte 90 ;40  sprinkler high temp
+                nv0byte 150 ;41   low wait minutes
+                nv0byte 48 ;42   high wait minutes
+                nv0byte 30;43   sprinkler 1 low spray seconds
+                nv0byte 30 ;44   sprinkler 1 high spray seconds
+                nv0byte 30 ;45   sprinkler 2 low seconds
+                nv0byte 30 ;46   sprinkelr 2 high seconds
+                nv0byte 60  ;47   RH ncompensation begin RH
+                nv0byte 115  ;48   dryoff adjustment @ 95%RH      ,dattype -100
+                nv0byte 95  ;49   spray time adjusment @ 95%RH    ,datatype -100
+                nv0byte 1 ;50    ;if sprinklers use effective temperature
+                nv0byte 74 ;51 temp triggered abovr this 
+                nv0byte 6  ;52 how many degrees are added if av temp above X
+                nv0byte 12 ;53  Av_temp_hour   ;hours used in avegae temp
+                nv0byte 50 ;54 humidity_ramp_low ;starting humidity for effectivr temp
+                nv0byte 8 ;55 eff_humidity ;how many degrees are added to effective temp at 95 RH   
+                nv0byte 1  ;56
+                nv0byte 1  ;57
+                nv0byte 1  ;58
+                nv0byte 60 ;59 heater 1 temperaure
+                nv0byte 55 ;60
+                nv0byte 18  ;61  heater deadspan                           
+
+config_parameters 
+                nv0byte 1  ;0 curtain_i number of curtains in the system       
+                nv0byte 0   ;1 fan_i number of fans in the system
+                nv0byte 0   ;2 sprinkler_i number of sprinklers in the system
+                nv0byte 0   ;3  0 if it will use f, 1 = celsuis 
+                nv0byte 180 ;4 max seconds  it will close curtain when its rains  
+                nv0byte 35  ;5 mph deadspan for fans
+                nv0byte 3   ;6  wind minutes
+                nv0byte 25  ;7 wind meter  calibration               
+                nv0byte 0   ;8 If fan #1 uses the duty cycle , 1= true 
+                nv0byte 0   ;9 If fan #2 uses the duty cycle , 1= true  
+                nv0byte 1   ;10 ;himidity or amp sensor, 0=none,1,humidity,2= amp  
+                nv0byte 1   ;11 if sprinklers use TIV    
+                nv0byte 0   ;12 if 0-10v HVLS outputs are being used, 
+                nv0byte 20  ;13 seconds of startup time, amp_start_length
+                nv0byte 15  ;14 amp  extra amps during startup ,amp_start_additional 
+                nv0byte 2   ;15 motor retry times untill it is disabled
+                nv0byte 10  ;16 amp meter multiplier  
+                nv0byte 25   ;17 amp meter dithering  
+                nv0byte 2    ;18how many heaters are in Commander 
+                NV0byte 50   ;19 interlock degrees  between heaters and curtains.
+                         
+nvram_amp_meter_cal nv0fnum .000
+
+
+
